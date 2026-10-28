@@ -1,0 +1,3 @@
+# Unified diff context and the verbatim upstream license contain intentional whitespace.
+patches/*.patch -whitespace
+LICENSE -whitespace

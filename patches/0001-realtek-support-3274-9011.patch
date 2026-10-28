@@ -1,0 +1,114 @@
+diff --git a/libfprint/drivers/realtek/realtek.c b/libfprint/drivers/realtek/realtek.c
+--- a/libfprint/drivers/realtek/realtek.c
++++ b/libfprint/drivers/realtek/realtek.c
+@@ -31,6 +31,7 @@
+   { .vid = 0x0bda,  .pid = 0x5816,  },
+   { .vid = 0x2541,  .pid = 0xfa03,  },
+   { .vid = 0x3274,  .pid = 0x9003,  },
++  { .vid = 0x3274,  .pid = 0x9011,  .driver_data = FP_RTK_QUIRK_TEMPLATE_STATUS_ONE,  },
+   { .vid = 0,  .pid = 0,  .driver_data = 0 },   /* terminating entry */
+ };
+ 
+@@ -611,6 +612,32 @@
+     }
+ }
+ 
++static gboolean
++template_table_is_valid (FpiDeviceRealtek *self)
++{
++  if (!self->read_data ||
++      self->template_num <= 0 ||
++      self->template_len != TEMPLATE_LEN_COMMON ||
++      self->trans_data_len != (gsize) self->template_num * self->template_len)
++    return FALSE;
++
++  for (gint i = 0; i < self->template_num; i++)
++    {
++      const guint8 *slot = self->read_data + (i * self->template_len);
++
++      if (slot[0] == 0)
++        continue;
++
++      if (slot[0] != 1 ||
++          slot[SUBFACTOR_OFFSET] != SUB_FINGER_01 ||
++          slot[UID_OFFSET] == 0 ||
++          slot[UID_OFFSET] == ' ')
++        return FALSE;
++    }
++
++  return TRUE;
++}
++
+ static void
+ fp_cmd_receive_cb (FpiUsbTransfer *transfer,
+                    FpDevice       *device,
+@@ -666,11 +693,31 @@
+ 
+   /* get status */
+   status_flag = parse_status (transfer->buffer, self->message_type);
++
++  /*
++   * The 3274:9011 firmware returns status 0x01 after a successful template
++   * table read.  Older Realtek MOC variants return 0x00.  Accept the alternate
++   * status only when the whole table is present and every occupied slot has a
++   * valid record header, so truncated and malformed responses remain errors.
++   */
++  if (status_flag == 0x01 &&
++      (fpi_device_get_driver_data (device) & FP_RTK_QUIRK_TEMPLATE_STATUS_ONE) &&
++      data->command_class == 0x45 &&
++      data->command_code == 0x0e &&
++      template_table_is_valid (self))
++    {
++      fp_info ("Valid template table reported with status 0x01; accepting variant status");
++      status_flag = 0;
++    }
++
+   if (status_flag != 0)
+     {
+       fpi_ssm_mark_failed (transfer->ssm,
+                            fpi_device_error_new_msg (FP_DEVICE_ERROR_PROTO,
+-                                                     "Status check failed"));
++                                                     "Status check failed for command %02x %02x (0x%02x)",
++                                                     data->command_class,
++                                                     data->command_code,
++                                                     status_flag));
+       return;
+     }
+ 
+@@ -897,6 +944,8 @@
+                                FP_RTK_CMD_NUM_STATES);
+ 
+   data->callback = callback;
++  data->command_class = cmd[0];
++  data->command_code = cmd[1];
+   fpi_ssm_set_data (self->cmd_ssm, data, (GDestroyNotify) fp_cmd_ssm_done_data_free);
+ 
+   fpi_ssm_start (self->cmd_ssm, fp_cmd_ssm_done);
+diff --git a/libfprint/drivers/realtek/realtek.h b/libfprint/drivers/realtek/realtek.h
+--- a/libfprint/drivers/realtek/realtek.h
++++ b/libfprint/drivers/realtek/realtek.h
+@@ -51,6 +51,8 @@
+ #define DEFAULT_UID_LEN 28
+ #define SUB_FINGER_01 0xFF
+ 
++#define FP_RTK_QUIRK_TEMPLATE_STATUS_ONE (1 << 0)
++
+ #define GET_BULK_CMD_TYPE(val)              ((val & 0xC0) >> 6)
+ #define GET_TRANS_DATA_LEN(len_h, len_l)    ((len_h << 8) | len_l)
+ #define GET_LEN_L(total_data_len)           ((total_data_len) & 0xff)
+@@ -65,6 +67,8 @@
+ typedef struct
+ {
+   SynCmdMsgCallback callback;
++  guint8 command_class;
++  guint8 command_code;
+ } CommandData;
+ 
+ typedef enum {
+@@ -243,4 +247,4 @@
+ 
+ static struct rtk_cmd_bulk co_cancel_capture = {
+   .cmd = {0x05, 0x07},
+-};
+\ No newline at end of file
++};
